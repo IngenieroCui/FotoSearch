@@ -1,0 +1,1 @@
+"""FotoSearch local backend."""
