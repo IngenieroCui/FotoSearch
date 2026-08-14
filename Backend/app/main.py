@@ -14,10 +14,15 @@ from .vector import normalize_embedding
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.db = Database(settings.database_path)
+    # Validar/cargar CLIP antes de invalidar una DB incompatible: un fallo de
+    # modelos no debe borrar un índice que todavía podría recuperarse.
     app.state.embedder = EmbeddingModel()
+    app.state.db = Database(settings.database_path)
     app.state.faces = FaceService()
-    app.state.normalizer = QueryNormalizer()
+    app.state.normalizer = QueryNormalizer(
+        translation_enabled=settings.translation_enabled,
+        translation_timeout_seconds=settings.translation_timeout_seconds,
+    )
     app.state.ranker = SearchRanker()
     try:
         yield
@@ -29,7 +34,20 @@ app = FastAPI(title="FotoSearch", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/health")
-def health(): return {"status": "ok", "face_recognition_available": app.state.faces.available}
+def health():
+    return {
+        "status": "ok",
+        "image_model": settings.clip_model,
+        "text_model": settings.text_model,
+        "embedding_dimension": app.state.embedder.embedding_dimension,
+        "embedding_version": settings.embedding_version,
+        "query_pipeline_version": settings.query_pipeline_version,
+        "face_embedding_version": settings.face_embedding_version,
+        "translation_enabled": settings.translation_enabled,
+        "device": app.state.embedder.device,
+        "face_recognition_available": app.state.faces.available,
+        "index_invalidation": app.state.db.invalidation_report,
+    }
 
 @app.post("/index/image")
 async def index_image(device_id: Annotated[str, Form()], asset_id: Annotated[str, Form()], image: Annotated[UploadFile, File()], modified_at: Annotated[str | None, Form()] = None, metadata: Annotated[str | None, Form()] = None):
@@ -128,26 +146,63 @@ def index_pending(request: IndexPendingRequest):
 
 @app.post("/search")
 def search(request: SearchRequest):
-    all_concepts = app.state.db.concepts()
-    parsed = app.state.normalizer.parse(request.query, [alias for c in all_concepts for alias in [c["name"], *c["aliases"]]])
-    applicable = [c for c in all_concepts if any(alias.lower() in request.query.lower() for alias in [c["name"], *c["aliases"]])]
-    query_embedding = app.state.embedder.encode_text(parsed.variants)
-    results = app.state.ranker.rank(app.state.db.photos(request.device_id), query_embedding, app.state.db.me(), applicable, app.state.db.feedback(request.device_id), parsed.requires_me)[:request.limit]
-    return {"query": request.query, "normalized_query": parsed.semantic_text, "results": results, "not_confident": not results or results[0]["semantic_score"] < settings.search_confidence_threshold}
+    concept_definitions = app.state.db.concepts(include_unavailable=True)
+    aliases = [alias for concept in concept_definitions for alias in [concept["name"], *concept["aliases"]]]
+    parsed = app.state.normalizer.parse(request.query, aliases)
+    active_concepts = {concept["id"]: concept for concept in app.state.db.concepts()}
+    applicable = [
+        concept
+        for concept in concept_definitions
+        if concept["id"] in active_concepts
+        and any(
+            alias.casefold() in {name.casefold() for name in parsed.personal_concepts}
+            for alias in [concept["name"], *concept["aliases"]]
+        )
+    ]
+    query_embeddings = app.state.embedder.encode_texts(parsed.variants)
+    me_embedding = app.state.db.me()
+    ranked = app.state.ranker.rank(
+        app.state.db.photos(request.device_id),
+        query_embeddings,
+        me_embedding,
+        applicable,
+        app.state.db.feedback(request.device_id),
+        parsed.requires_me,
+        parsed.variants,
+    )
+    results = ranked[:request.limit]
+    best_semantic = max((item["semantic_score"] for item in results), default=float("-inf"))
+    low_confidence = not results or best_semantic < settings.search_confidence_threshold
+    return {
+        "query": request.query,
+        "semantic_query": parsed.semantic_text,
+        "normalized_query": parsed.semantic_text,
+        "variants": parsed.variants,
+        "results": results,
+        "low_confidence": low_confidence,
+        "not_confident": low_confidence,
+        "requires_identity_setup": parsed.requires_me and me_embedding is None,
+    }
 
 @app.post("/feedback")
 def feedback(request: FeedbackRequest):
-    photo = next((p for p in app.state.db.photos(request.device_id) if p["asset_id"] == request.asset_id), None)
+    photo = app.state.db.photo(request.device_id, request.asset_id)
     if photo is None: raise HTTPException(404, "La foto no está indexada")
     if request.learn:
-        app.state.db.add_feedback(request.device_id, request.query, app.state.embedder.encode_text([request.query]), request.asset_id, photo["embedding"], request.relevant)
+        definitions = app.state.db.concepts(include_unavailable=True)
+        aliases = [alias for concept in definitions for alias in [concept["name"], *concept["aliases"]]]
+        parsed = app.state.normalizer.parse(request.query, aliases)
+        app.state.db.add_feedback(request.device_id, request.query, app.state.embedder.encode_text(parsed.semantic_text), request.asset_id, photo["embedding"], request.relevant)
     return {"status": "saved"}
 
 @app.post("/feedback/correction")
 async def correction(device_id: Annotated[str, Form()], query: Annotated[str, Form()], asset_id: Annotated[str, Form()], image: Annotated[UploadFile, File()], modified_at: Annotated[str | None, Form()] = None):
     data = await image.read(); embedding = app.state.embedder.encode_image(data)
     app.state.db.upsert_photo(device_id, asset_id, modified_at, {}, embedding, app.state.faces.encode_face(data))
-    app.state.db.add_feedback(device_id, query, app.state.embedder.encode_text([query]), asset_id, embedding, True)
+    definitions = app.state.db.concepts(include_unavailable=True)
+    aliases = [alias for concept in definitions for alias in [concept["name"], *concept["aliases"]]]
+    parsed = app.state.normalizer.parse(query, aliases)
+    app.state.db.add_feedback(device_id, query, app.state.embedder.encode_text(parsed.semantic_text), asset_id, embedding, True, strong=True)
     return {"status": "learned", "asset_id": asset_id}
 
 @app.post("/identities/face/enroll")
@@ -171,7 +226,11 @@ async def create_concept(name: Annotated[str, Form()], aliases: Annotated[str | 
     return {"id": identifier, "name": name, "aliases": parsed_aliases}
 
 @app.get("/concepts")
-def concepts(): return [{"id": c["id"], "name": c["name"], "aliases": c["aliases"]} for c in app.state.db.concepts()]
+def concepts():
+    return [
+        {"id": concept["id"], "name": concept["name"], "aliases": concept["aliases"], "needs_rebuild": concept["needs_rebuild"]}
+        for concept in app.state.db.concepts(include_unavailable=True)
+    ]
 
 @app.delete("/concepts/{concept_id}")
 def delete_concept(concept_id: str): app.state.db.delete_concept(concept_id); return {"status": "deleted"}

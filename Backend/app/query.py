@@ -1,15 +1,41 @@
 from dataclasses import dataclass
 import re
+from queue import Empty, Queue
+from threading import Thread
+from typing import Callable
 
 
-_FILLERS = re.compile(r"\b(quiero|busca|buscame|mu[eé]strame|dame|una?|foto(?:graf[ií]a)?|donde|aparezca|que|con|de)\b", re.I)
-_IDENTITY = re.compile(r"\b(yo|m[ií]a|m[ií]o|mi persona)\b", re.I)
-_TRANSLATIONS = {
-    "camiseta": "t-shirt", "camisa": "shirt", "chaqueta": "jacket", "vestido": "dress",
-    "roja": "red", "rojo": "red", "azul": "blue", "verde": "green", "negro": "black", "blanco": "white",
-    "perro": "dog", "gato": "cat", "mascota": "pet", "carro": "car", "bicicleta": "bicycle",
-    "playa": "beach", "parque": "park", "casa": "house", "comida": "food", "noche": "night",
-    "persona": "person", "sonriendo": "smiling", "dos personas": "two people",
+# "mi" / "my" por sí solos son posesivos ("mi mascota"), no identidad.
+_IDENTITY = re.compile(r"\b(mi persona|yo|mí|mía|mío|myself|me)\b", re.I)
+_REQUEST_PREFIXES = (
+    re.compile(r"^(?:por favor\s+)?(?:quiero|quisiera|busca(?:me)?|encuentra(?:me)?|mu[eé]strame|dame)\s+", re.I),
+    re.compile(r"^(?:una?\s+)?(?:foto(?:graf[ií]a)?|imagen)\s+(?:de|donde|en la que|con)\s+", re.I),
+    re.compile(r"^(?:donde\s+)?(?:salga|aparezca|se vea)\s+", re.I),
+    re.compile(r"^(?:una?\s+)?persona\s+(?:usando|con|que lleva)\s+(?:una?\s+)?", re.I),
+    re.compile(r"^(?:con|de)\s+", re.I),
+)
+
+COLORS = {
+    "rojo": "red", "roja": "red", "rojos": "red", "rojas": "red",
+    "azul": "blue", "azules": "blue", "verde": "green", "verdes": "green",
+    "negro": "black", "negra": "black", "negros": "black", "negras": "black",
+    "blanco": "white", "blanca": "white", "blancos": "white", "blancas": "white",
+    "amarillo": "yellow", "amarilla": "yellow", "amarillos": "yellow", "amarillas": "yellow",
+}
+CLOTHING = {
+    "camiseta": "t-shirt", "camisetas": "t-shirts", "camisa": "shirt", "camisas": "shirts",
+    "chaqueta": "jacket", "chaquetas": "jackets", "vestido": "dress", "vestidos": "dresses",
+    "pantalón": "pants", "pantalones": "pants",
+}
+COMMON_OBJECTS = {
+    "perro": "dog", "perros": "dogs", "gato": "cat", "gatos": "cats",
+    "mascota": "pet", "mascotas": "pets", "carro": "car", "carros": "cars",
+    "coche": "car", "coches": "cars", "bicicleta": "bicycle", "bicicletas": "bicycles",
+    "playa": "beach", "playas": "beaches", "parque": "park", "parques": "parks",
+}
+_OTHER_WORDS = {
+    "persona": "person", "personas": "people", "con": "with", "en": "at",
+    "de": "of", "la": "", "el": "", "los": "", "las": "", "y": "and",
 }
 
 
@@ -19,22 +45,129 @@ class ParsedQuery:
     semantic_text: str
     requires_me: bool
     variants: list[str]
+    personal_concepts: list[str]
+
+
+def _deduplicate(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            result.append(normalized)
+    return result
+
+
+def _shorten_request(text: str) -> str:
+    previous = None
+    while text != previous:
+        previous = text
+        for pattern in _REQUEST_PREFIXES:
+            text = pattern.sub("", text).strip()
+    return text
+
+
+def _local_english(text: str) -> str | None:
+    """Traduce únicamente el vocabulario visual pequeño y conocido."""
+    translated = text
+    changed = False
+
+    # En español el color suele seguir a la prenda; en inglés la precede.
+    clothing_words = "|".join(sorted(map(re.escape, CLOTHING), key=len, reverse=True))
+    color_words = "|".join(sorted(map(re.escape, COLORS), key=len, reverse=True))
+
+    def clothing_color(match: re.Match[str]) -> str:
+        nonlocal changed
+        changed = True
+        return f"{COLORS[match.group(2)]} {CLOTHING[match.group(1)]}"
+
+    translated = re.sub(rf"\b({clothing_words})\s+({color_words})\b", clothing_color, translated)
+    vocabulary = {**CLOTHING, **COLORS, **COMMON_OBJECTS, **_OTHER_WORDS}
+    for spanish, english in sorted(vocabulary.items(), key=lambda item: -len(item[0])):
+        replaced = re.sub(r"\b" + re.escape(spanish) + r"\b", english, translated)
+        if replaced != translated:
+            changed = True
+            translated = replaced
+    return re.sub(r"\s+", " ", translated).strip() if changed else None
 
 
 class QueryNormalizer:
+    def __init__(
+        self,
+        translation_enabled: bool = False,
+        translator: Callable[[str], str] | None = None,
+        translation_timeout_seconds: float = 2.0,
+    ):
+        self.translation_enabled = translation_enabled
+        self._translator = translator
+        self.translation_timeout_seconds = translation_timeout_seconds
+
+    def _optional_translation(self, text: str) -> str | None:
+        if not self.translation_enabled:
+            return None
+        result: Queue[str | None] = Queue(maxsize=1)
+
+        def translate() -> None:
+            try:
+                if self._translator is not None:
+                    value = self._translator(text)
+                else:
+                    from deep_translator import GoogleTranslator
+                    value = GoogleTranslator(source="auto", target="en").translate(text)
+                result.put(value)
+            except Exception:
+                result.put(None)
+
+        # Daemon evita que una caída de Google bloquee el proceso o la búsqueda.
+        Thread(target=translate, daemon=True).start()
+        try:
+            return result.get(timeout=self.translation_timeout_seconds)
+        except Empty:
+            return None
+
     def parse(self, query: str, concept_names: list[str]) -> ParsedQuery:
-        cleaned = query.strip().lower()
+        cleaned = re.sub(r"\s+", " ", query.strip().lower())
         requires_me = bool(_IDENTITY.search(cleaned))
-        cleaned = _IDENTITY.sub("", cleaned)
-        for name in concept_names:
-            cleaned = re.sub(r"\b" + re.escape(name.lower()) + r"\b", "", cleaned)
-        semantic = _FILLERS.sub(" ", cleaned)
-        semantic = re.sub(r"\s+", " ", semantic).strip() or "photo"
-        translated = semantic
-        for spanish, english in sorted(_TRANSLATIONS.items(), key=lambda item: -len(item[0])):
-            translated = re.sub(r"\b" + re.escape(spanish) + r"\b", english, translated)
+        cleaned = _IDENTITY.sub(" ", cleaned)
+
+        matched_concepts: list[str] = []
+        for name in sorted(concept_names, key=len, reverse=True):
+            pattern = re.compile(r"\b" + re.escape(name.lower()) + r"\b", re.I)
+            if pattern.search(cleaned):
+                matched_concepts.append(name)
+                # Conserva el sustantivo genérico ("mi perro" -> "perro") para
+                # que la primera etapa siga siendo recuperación CLIP real.
+                generic = re.sub(r"^(?:mi|mis|my)\s+", "", name.lower()).strip()
+                cleaned = pattern.sub(generic if generic != name.lower() else " ", cleaned)
+
+        semantic = _shorten_request(re.sub(r"\s+", " ", cleaned).strip()) or "photo"
+        local_english = _local_english(semantic)
         variants = [semantic]
-        if translated != semantic:
-            variants.append(translated)
-        variants.append(f"a photo of {translated}")
-        return ParsedQuery(query, semantic, requires_me, variants[:3])
+        has_clothing = any(
+            re.search(r"\b" + re.escape(word) + r"\b", semantic)
+            for word in [*CLOTHING, *CLOTHING.values()]
+        )
+        if has_clothing and not re.search(r"\b(persona|person|people)\b", semantic):
+            is_spanish_clothing = any(
+                re.search(r"\b" + re.escape(word) + r"\b", semantic) for word in CLOTHING
+            )
+            variants.append(
+                f"persona con {semantic}" if is_spanish_clothing else f"person wearing {semantic}"
+            )
+        english_variants = _deduplicate(
+            [item for item in [local_english, self._optional_translation(semantic)] if item]
+        )
+        for english in english_variants:
+            variants.append(english)
+            if has_clothing:
+                variants.append(f"a photo of a person wearing {english}")
+            else:
+                variants.append(f"a photo of {english}")
+        if not english_variants:
+            variants.append(
+                f"a photo of a person wearing {semantic}" if has_clothing else f"a photo of {semantic}"
+            )
+
+        return ParsedQuery(query, semantic, requires_me, _deduplicate(variants), _deduplicate(matched_concepts))

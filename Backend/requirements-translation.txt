@@ -1,0 +1,2 @@
+# Mejora opcional: la búsqueda ES/EN funciona sin instalar este archivo.
+deep-translator>=1.11,<2

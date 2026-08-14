@@ -30,7 +30,10 @@ class IndexPendingRequest(BaseModel):
 class SearchResult(BaseModel):
     asset_id: str
     score: float
+    final_score: float
     semantic_score: float
+    relevance_score: float
+    best_query_variant: str
     identity_score: float = 0.0
     concept_score: float = 0.0
     feedback_adjustment: float = 0.0

@@ -41,7 +41,7 @@ abstract final class AppConfig {
   static int get searchLimit => _int(
         const String.fromEnvironment('FOTOSEARCH_SEARCH_LIMIT'),
         'FOTOSEARCH_SEARCH_LIMIT',
-        60,
+        30,
       );
   static int get indexBatchSize => _int(
         const String.fromEnvironment('FOTOSEARCH_INDEX_BATCH_SIZE'),
@@ -212,6 +212,7 @@ class _FotoSearchHomeState extends State<FotoSearchHome> {
   int _tab = 0;
   List<AssetEntity> _assets = [];
   List<Map<String, dynamic>> _results = [];
+  final Map<String, bool> _feedbackByAsset = {};
   String _lastQuery = '';
   bool _busy = false;
   bool _cancelRequested = false;
@@ -328,7 +329,17 @@ class _FotoSearchHomeState extends State<FotoSearchHome> {
     setState(() { _busy = true; _notice = null; });
     try {
       final response = await _api.search(_deviceId, query);
-      setState(() { _lastQuery = query; _results = (response['results'] as List).cast<Map<String, dynamic>>(); _tab = 2; _notice = response['not_confident'] == true ? 'No estoy seguro de haber encontrado lo que buscas.' : null; });
+      setState(() {
+        _lastQuery = query.trim();
+        _results = (response['results'] as List).cast<Map<String, dynamic>>();
+        _feedbackByAsset.clear();
+        _tab = 2;
+        _notice = response['requires_identity_setup'] == true
+            ? 'Configura “Yo” en Personalizar para que esta búsqueda identifique tu rostro.'
+            : response['not_confident'] == true
+                ? 'Solo se muestran coincidencias con suficiente relevancia.'
+                : null;
+      });
     } catch (e) { setState(() => _notice = '$e'); }
     finally { if (mounted) setState(() => _busy = false); }
   }
@@ -353,12 +364,30 @@ class _FotoSearchHomeState extends State<FotoSearchHome> {
     if (mounted) setState(() => _notice = 'Concepto creado: $name');
   }
 
+  Future<void> _submitFeedback(String assetId, bool relevant) async {
+    try {
+      await _api.feedback(_deviceId, _lastQuery, assetId, relevant);
+      if (!mounted) return;
+      setState(() => _feedbackByAsset[assetId] = relevant);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text(relevant
+              ? 'Marcada como relevante. Se usará en esta y búsquedas parecidas.'
+              : 'Marcada como no relevante. Reduciré fotos parecidas.'),
+        ));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo guardar el feedback: $error')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [
       SearchPage(onSearch: _search, busy: _busy),
       IndexPage(assets: _assets, busy: _busy, notice: _notice, onLoad: _loadGallery, onIndex: _index, onCancel: _cancelIndex),
-      ResultsPage(results: _results, query: _lastQuery, notice: _notice, assetFor: _asset, onFeedback: (id, good) async { await _api.feedback(_deviceId, _lastQuery, id, good); if (mounted) setState(() => _notice = good ? 'Feedback positivo guardado.' : 'Feedback negativo guardado.'); }, onCorrect: () async { final selected = await _selectPhotos(context); if (selected?.isNotEmpty == true) { await _api.correction(_deviceId, _lastQuery, selected!.first); if (mounted) setState(() => _notice = 'Corrección aprendida. Busca de nuevo para ver el cambio.'); } }),
+      ResultsPage(results: _results, query: _lastQuery, notice: _notice, assetFor: _asset, feedbackByAsset: _feedbackByAsset, onFeedback: _submitFeedback, onCorrect: () async { final selected = await _selectPhotos(context); if (selected?.isNotEmpty == true) { await _api.correction(_deviceId, _lastQuery, selected!.first); if (mounted) setState(() => _notice = 'Corrección aprendida. Busca de nuevo para ver el cambio.'); } }),
       PersonalizationPage(assets: _assets, onEnroll: _configureMe, onConcept: _createConcept, api: _api),
       SettingsPage(url: _url, onSave: (url) async { final prefs = await SharedPreferences.getInstance(); await prefs.setString('backend_url', url); setState(() { _url = url; _notice = 'URL guardada.'; }); }),
     ];
@@ -416,11 +445,12 @@ class IndexPage extends StatelessWidget {
 }
 
 class ResultsPage extends StatelessWidget {
-  const ResultsPage({super.key, required this.results, required this.query, required this.notice, required this.assetFor, required this.onFeedback, required this.onCorrect});
+  const ResultsPage({super.key, required this.results, required this.query, required this.notice, required this.assetFor, required this.feedbackByAsset, required this.onFeedback, required this.onCorrect});
   final List<Map<String, dynamic>> results;
   final String query;
   final String? notice;
   final AssetEntity? Function(String) assetFor;
+  final Map<String, bool> feedbackByAsset;
   final Future<void> Function(String, bool) onFeedback;
   final Future<void> Function() onCorrect;
 
@@ -436,15 +466,19 @@ class ResultsPage extends StatelessWidget {
                   itemCount: results.length,
                   itemBuilder: (_, index) {
                     final item = results[index];
-                    final asset = assetFor(item['asset_id'] as String);
+                    final assetId = item['asset_id'] as String;
+                    final asset = assetFor(assetId);
+                    final feedback = feedbackByAsset[assetId];
+                    final relevance = (item['relevance_score'] ?? item['semantic_score']) as num;
+                    final label = relevance >= .30 ? 'Coincidencia alta' : relevance >= .24 ? 'Coincidencia media' : 'Coincidencia';
                     return Card(
                       clipBehavior: Clip.antiAlias,
                       child: Column(children: [
                         Expanded(child: asset == null ? const Center(child: Icon(Icons.broken_image)) : AssetThumbnail(asset: asset, size: 320)),
-                        Padding(padding: const EdgeInsets.fromLTRB(6, 4, 2, 0), child: Text('Score ${(item['score'] as num).toStringAsFixed(2)} · sem ${(item['semantic_score'] as num).toStringAsFixed(2)}', style: Theme.of(context).textTheme.labelSmall)),
+                        Padding(padding: const EdgeInsets.fromLTRB(8, 6, 8, 0), child: Align(alignment: Alignment.centerLeft, child: Text(label, style: Theme.of(context).textTheme.labelMedium))),
                         Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                          IconButton(tooltip: 'Sí, era relevante', onPressed: () => onFeedback(item['asset_id'] as String, true), icon: const Icon(Icons.thumb_up_outlined)),
-                          IconButton(tooltip: 'No era relevante', onPressed: () => onFeedback(item['asset_id'] as String, false), icon: const Icon(Icons.thumb_down_outlined)),
+                          IconButton(tooltip: 'Sí, era relevante', color: feedback == true ? Theme.of(context).colorScheme.primary : null, onPressed: () => onFeedback(assetId, true), icon: Icon(feedback == true ? Icons.thumb_up : Icons.thumb_up_outlined)),
+                          IconButton(tooltip: 'No era relevante', color: feedback == false ? Theme.of(context).colorScheme.error : null, onPressed: () => onFeedback(assetId, false), icon: Icon(feedback == false ? Icons.thumb_down : Icons.thumb_down_outlined)),
                         ]),
                       ]),
                     );

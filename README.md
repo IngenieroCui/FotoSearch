@@ -4,9 +4,9 @@ FotoSearch busca fotos de la galería del teléfono con lenguaje natural, manten
 
 ## Arquitectura
 
-`frontend/` es la app Flutter Android preparada para iOS mediante `photo_manager`. `Backend/` es un FastAPI local con SQLite y búsqueda NumPy. El modelo `clip-ViT-B-32` de SentenceTransformers genera embeddings de imagen y texto; un normalizador local traduce los términos de demostración español→inglés para CLIP. `EmbeddingModel` permite sustituirlo más adelante por SigLIP. No hay APIs de IA pagas, LLMs ni fine-tuning.
+`frontend/` es la app Flutter Android preparada para iOS mediante `photo_manager`. `Backend/` es un FastAPI local con SQLite y búsqueda NumPy. `clip-ViT-B-32` genera los embeddings de imagen y `clip-ViT-B-32-multilingual-v1` genera consultas de más de 50 idiomas en el mismo espacio vectorial. El español original siempre se codifica y un diccionario local pequeño agrega variantes visuales en inglés para colores, ropa y objetos frecuentes. No hay APIs de IA pagas, LLMs ni fine-tuning.
 
-El ranking centralizado combina similitud CLIP, identidad facial cuando la consulta incluye “yo”, concepto personal registrado y refuerzo/penalización de feedback similar. La configuración se concentra en variables de entorno y se puede copiar desde `Backend/.env.example`.
+El ranking tiene dos etapas. Primero selecciona hasta 100 candidatos únicamente por el máximo score CLIP entre variantes independientes; no promedia queries. Después aplica identidad facial, conceptos personales y feedback acotado. El feedback general usa como máximo tres ejemplos y queda entre `-0.05` y `+0.05`; un voto exacto usa `-0.10` o `+0.08`. La configuración se concentra en variables de entorno y se puede copiar desde `Backend/.env.example`.
 
 ## Ejecutar el backend (Windows PowerShell)
 
@@ -32,7 +32,12 @@ Las variables más habituales son estas:
 | `FOTOSEARCH_HOST` / `FOTOSEARCH_PORT` | `0.0.0.0` / `8000` | IP de escucha y puerto del backend |
 | `FOTOSEARCH_DB` | `Backend/data/fotosearch.db` | Ubicación de SQLite |
 | `FOTOSEARCH_CORS_ORIGINS` | `*` | Orígenes web permitidos, separados por coma |
-| `FOTOSEARCH_CLIP_MODEL` | `clip-ViT-B-32` | Modelo de embeddings |
+| `FOTOSEARCH_CLIP_MODEL` | `clip-ViT-B-32` | Modelo de embeddings visuales |
+| `FOTOSEARCH_TEXT_MODEL` | `sentence-transformers/clip-ViT-B-32-multilingual-v1` | Encoder de texto multilingüe alineado con el visual |
+| `FOTOSEARCH_EMBEDDING_VERSION` | `clip-b32-multilingual-v2` | Invalida automáticamente vectores CLIP incompatibles |
+| `FOTOSEARCH_QUERY_PIPELINE_VERSION` | `query-v3` | Invalida feedback generado por otro pipeline de consulta |
+| `FOTOSEARCH_TRANSLATION_ENABLED` | `false` | Variante adicional opcional con Google Translate gratuito |
+| `FOTOSEARCH_SEMANTIC_CANDIDATES` | `100` | Top K puramente semántico que pasa al reranking |
 | `FOTOSEARCH_MAX_IMAGE_SIDE` | `768` | Tamaño máximo procesado por el backend |
 | `FOTOSEARCH_EMBEDDING_BATCH_SIZE` | `48` | Imágenes que CLIP procesa a la vez durante la indexación |
 | `FOTOSEARCH_ENABLE_FACE_RECOGNITION` | `true` | Activa o desactiva FaceNet |
@@ -40,6 +45,12 @@ Las variables más habituales son estas:
 | `FOTOSEARCH_*_WEIGHT` y `FOTOSEARCH_*_THRESHOLD` | Ver `.env.example` | Ajustes de ranking y confianza |
 
 Para desarrollo, usa `FOTOSEARCH_RELOAD=true`. Si necesitas invocar Uvicorn directamente, hazlo siempre con el Python del entorno: `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+
+La traducción remota no es necesaria. Para probarla, instala `Backend/requirements-translation.txt` y activa `FOTOSEARCH_TRANSLATION_ENABLED=true`. Tiene timeout y cualquier error conserva las variantes locales ES/EN.
+
+### Compatibilidad de la base existente
+
+Al arrancar se comparan versión, modelo visual, modelo textual y versión del pipeline con `app_metadata`. Una DB sin metadata se considera antigua: se vacían `photos` (para que `/index/pending` solicite reindexación completa) y `search_feedback`; los `concept_examples` incompatibles se eliminan y cada `personal_concept` queda con `needs_rebuild=true`. No se borran identidades ni embeddings faciales porque FaceNet usa una versión independiente. Si esa versión facial cambia explícitamente, entonces sí se invalidan solamente sus tablas.
 
 ## Ejecutar Android
 
