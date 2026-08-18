@@ -40,6 +40,61 @@ def test_query_normalization_keeps_spanish_and_expands_common_visual_terms():
     assert parsed.variants[0] == "camiseta roja"
     assert "red t-shirt" in parsed.variants
     assert "a photo of a person wearing red t-shirt" in parsed.variants
+    assert parsed.constraints is not None
+    assert parsed.constraints["object"] == "camiseta"
+    assert parsed.constraints["attribute"] == "roja"
+    assert "camiseta" not in parsed.joint_variants
+    assert "roja" not in parsed.joint_variants
+
+
+def test_compositional_constraints_cover_requested_regressions():
+    normalizer = QueryNormalizer()
+    for query, object_, color in [
+        ("camiseta roja", "camiseta", "roja"),
+        ("perro negro", "perro", "negro"),
+        ("carro rojo", "carro", "rojo"),
+    ]:
+        parsed = normalizer.parse(query, [])
+        assert parsed.constraints is not None
+        assert parsed.constraints["object"] == object_
+        assert parsed.constraints["attribute"] == color
+
+
+def test_compositional_reranking_promotes_complete_object_and_color_match():
+    # El distractor gana CLIP conjunto inicialmente, pero no cubre el atributo.
+    real = normalize_embedding(np.array([0.75, 0.55, 0.55]))
+    distractor = normalize_embedding(np.array([0.90, 0.65, 0.0]))
+    results = SearchRanker().rank(
+        [_photo("red-shirt", real), _photo("shirt-no-color", distractor)],
+        np.array([1.0, 0.0, 0.0]),
+        None,
+        [],
+        [],
+        False,
+        ["red shirt"],
+        {
+            "object": np.array([0.0, 1.0, 0.0]),
+            "attribute": np.array([0.0, 0.0, 1.0]),
+            "target_color_joint": np.array([0.0, 0.0, 1.0]),
+            "color_competitors": [np.array([0.0, 0.0, -1.0])],
+        },
+    )
+    assert results[0]["asset_id"] == "red-shirt"
+    assert results[0]["coverage_score"] > results[1]["coverage_score"]
+
+
+def test_simple_queries_keep_semantic_order_without_compositional_constraints():
+    results = SearchRanker().rank(
+        [_photo("dog", [1, 0]), _photo("beach", [0, 1])],
+        np.array([1, 0]),
+        None,
+        [],
+        [],
+        False,
+        ["perro"],
+    )
+    assert [item["asset_id"] for item in results] == ["dog", "beach"]
+    assert all(item["compositional_score"] == item["semantic_score"] for item in results)
 
 
 def test_parse_identity_and_personal_concept_separately():

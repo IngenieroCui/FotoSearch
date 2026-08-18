@@ -153,6 +153,7 @@ class SearchRanker:
         feedback: list[dict],
         requires_me: bool,
         query_variants: list[str] | None = None,
+        constraint_embeddings: dict[str, object] | None = None,
     ) -> list[dict]:
         vectors = self._query_vectors(query_embeddings)
         if not vectors:
@@ -178,7 +179,9 @@ class SearchRanker:
                 related_feedback.append((query_similarity, item))
         related_feedback.sort(key=lambda pair: pair[0], reverse=True)
 
-        # Etapa B: identidad, conceptos y feedback limitado, solo sobre Top K.
+        # Etapa B: soft-AND composicional, identidad, conceptos y feedback,
+        # siempre solo sobre el Top K semántico. Para consultas simples este
+        # bloque no se activa y el ranking anterior queda intacto.
         scored: list[dict] = []
         for semantic, best_variant, photo in semantic_candidates:
             identity = (
@@ -194,8 +197,39 @@ class SearchRanker:
                 default=0.0,
             )
             adjustment = self._feedback_adjustment(photo, related_feedback)
+            joint_score = semantic
+            object_score = 0.0
+            attribute_score = 0.0
+            coverage = 0.0
+            color_competition = 0.0
+            compositional_score = semantic
+            if constraint_embeddings is not None:
+                object_vector = np.asarray(constraint_embeddings["object"])
+                attribute_vector = np.asarray(constraint_embeddings["attribute"])
+                object_score = cosine_similarity(photo["embedding"], object_vector)
+                attribute_score = cosine_similarity(photo["embedding"], attribute_vector)
+                # Soft-AND: una sola señal alta no compensa que falte la otra.
+                coverage = min(object_score, attribute_score)
+                compositional_score = (
+                    settings.compositional_joint_weight * joint_score
+                    + settings.compositional_coverage_weight * coverage
+                )
+                competitors = [np.asarray(vector) for vector in constraint_embeddings.get("color_competitors", [])]
+                if competitors:
+                    target_color_score = cosine_similarity(
+                        photo["embedding"], np.asarray(constraint_embeddings["target_color_joint"])
+                    )
+                    alternative_score = max(
+                        cosine_similarity(photo["embedding"], vector) for vector in competitors
+                    )
+                    # Margen firmado: favorece el color pedido frente a prendas
+                    # iguales de otro color, sin introducir un filtro duro.
+                    color_competition = target_color_score - alternative_score
+                    compositional_score += (
+                        settings.compositional_color_competition_weight * color_competition
+                    )
             final = (
-                settings.semantic_weight * semantic
+                settings.semantic_weight * compositional_score
                 + (settings.identity_weight * max(identity, 0.0) if requires_me else 0.0)
                 + (settings.concept_weight * max(concept, 0.0) if concepts else 0.0)
                 + adjustment
@@ -207,6 +241,12 @@ class SearchRanker:
                 "semantic_score": semantic,
                 "relevance_score": semantic,
                 "best_query_variant": best_variant,
+                "joint_score": joint_score,
+                "object_score": object_score,
+                "attribute_score": attribute_score,
+                "coverage_score": coverage,
+                "color_competition_score": color_competition,
+                "compositional_score": compositional_score,
                 "identity_score": identity if requires_me else 0.0,
                 "concept_score": concept if concepts else 0.0,
                 "feedback_adjustment": adjustment,

@@ -46,6 +46,12 @@ class ParsedQuery:
     requires_me: bool
     variants: list[str]
     personal_concepts: list[str]
+    constraints: dict[str, object] | None = None
+
+    @property
+    def joint_variants(self) -> list[str]:
+        """Nombre explícito para las variantes que representan la intención completa."""
+        return self.variants
 
 
 def _deduplicate(values: list[str]) -> list[str]:
@@ -91,6 +97,52 @@ def _local_english(text: str) -> str | None:
             changed = True
             translated = replaced
     return re.sub(r"\s+", " ", translated).strip() if changed else None
+
+
+def _compositional_constraints(semantic: str) -> dict[str, object] | None:
+    """Detecta objecto + color sin convertir sus partes en queries equivalentes.
+
+    Las variantes conjuntas siguen siendo la señal de recuperación. Estas
+    restricciones se codifican aparte para el soft-AND del reranking.
+    """
+    colors = {**COLORS, **{value: value for value in COLORS.values()}}
+    objects = {
+        **CLOTHING,
+        **COMMON_OBJECTS,
+        **{value: value for value in [*CLOTHING.values(), *COMMON_OBJECTS.values()]},
+    }
+
+    def find(vocabulary: dict[str, str]) -> tuple[str, str] | None:
+        matches: list[tuple[int, str, str]] = []
+        for term, canonical in vocabulary.items():
+            match = re.search(r"\b" + re.escape(term) + r"\b", semantic, re.I)
+            if match:
+                matches.append((match.start(), term, canonical))
+        if not matches:
+            return None
+        _, term, canonical = min(matches, key=lambda item: item[0])
+        return term, canonical
+
+    color = find(colors)
+    # La ropa tiene prioridad: en "persona con camiseta roja" el objeto es la
+    # camiseta, no la persona implícita en la variante conjunta.
+    object_ = find({**CLOTHING, **{value: value for value in CLOTHING.values()}}) or find(objects)
+    if color is None or object_ is None:
+        return None
+    object_term, object_english = object_
+    color_term, color_english = color
+    competitors = _deduplicate(
+        f"{alternative} {object_english}"
+        for alternative in sorted(set(COLORS.values()))
+        if alternative != color_english
+    )
+    return {
+        "object": object_term,
+        "attribute": color_term,
+        "color": color_english,
+        "object_english": object_english,
+        "color_competitors": competitors,
+    }
 
 
 class QueryNormalizer:
@@ -170,4 +222,11 @@ class QueryNormalizer:
                 f"a photo of a person wearing {semantic}" if has_clothing else f"a photo of {semantic}"
             )
 
-        return ParsedQuery(query, semantic, requires_me, _deduplicate(variants), _deduplicate(matched_concepts))
+        return ParsedQuery(
+            query,
+            semantic,
+            requires_me,
+            _deduplicate(variants),
+            _deduplicate(matched_concepts),
+            _compositional_constraints(semantic),
+        )

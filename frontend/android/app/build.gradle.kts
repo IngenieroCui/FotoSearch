@@ -14,15 +14,24 @@ if (localPropertiesFile.exists()) {
 val configuredNdkPath = localProperties.getProperty("fotosearch.ndkPath")
     ?: providers.gradleProperty("fotosearch.ndkPath").orNull
     ?: System.getenv("ANDROID_NDK_HOME")
+val configuredFlutterSdkPath = localProperties.getProperty("flutter.sdk")
+    ?: error("Configura flutter.sdk en android/local.properties")
 
 android {
     namespace = "com.example.frontend"
     compileSdk = flutter.compileSdkVersion
-    // NDK r29 instalado manualmente en este equipo. La ruta se mantiene en
-    // android/local.properties para no fijar una ruta personal en el proyecto.
+    // Usa el NDK r29 instalado manualmente, no la instalación numérica defectuosa.
     ndkVersion = "29.0.14206865"
     ndkPath = configuredNdkPath
         ?: error("Configura fotosearch.ndkPath en android/local.properties o ANDROID_NDK_HOME")
+
+    // Evita que el plugin de Flutter intente provisionar otro NDK mediante
+    // sdkmanager durante flutter build appbundle --release.
+    externalNativeBuild {
+        cmake {
+            path = file("$configuredFlutterSdkPath/packages/flutter_tools/gradle/src/main/scripts/CMakeLists.txt")
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

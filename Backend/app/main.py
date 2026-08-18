@@ -159,7 +159,21 @@ def search(request: SearchRequest):
             for alias in [concept["name"], *concept["aliases"]]
         )
     ]
-    query_embeddings = app.state.embedder.encode_texts(parsed.variants)
+    query_embeddings = app.state.embedder.encode_texts(parsed.joint_variants)
+    constraint_embeddings = None
+    if parsed.constraints is not None:
+        # Se reutilizan exclusivamente los embeddings de las fotos indexadas;
+        # aquí solo se crean textos de consulta para el reranking del Top K.
+        constraint_embeddings = {
+            "object": app.state.embedder.encode_text(str(parsed.constraints["object"])),
+            "attribute": app.state.embedder.encode_text(str(parsed.constraints["attribute"])),
+            "target_color_joint": app.state.embedder.encode_text(
+                f"{parsed.constraints['color']} {parsed.constraints['object_english']}"
+            ),
+            "color_competitors": app.state.embedder.encode_texts(
+                list(parsed.constraints["color_competitors"])
+            ),
+        }
     me_embedding = app.state.db.me()
     ranked = app.state.ranker.rank(
         app.state.db.photos(request.device_id),
@@ -168,7 +182,8 @@ def search(request: SearchRequest):
         applicable,
         app.state.db.feedback(request.device_id),
         parsed.requires_me,
-        parsed.variants,
+        parsed.joint_variants,
+        constraint_embeddings,
     )
     results = ranked[:request.limit]
     best_semantic = max((item["semantic_score"] for item in results), default=float("-inf"))
@@ -178,6 +193,8 @@ def search(request: SearchRequest):
         "semantic_query": parsed.semantic_text,
         "normalized_query": parsed.semantic_text,
         "variants": parsed.variants,
+        "joint_variants": parsed.joint_variants,
+        "constraints": parsed.constraints,
         "results": results,
         "low_confidence": low_confidence,
         "not_confident": low_confidence,

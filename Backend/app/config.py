@@ -75,6 +75,9 @@ class Settings:
 
     # Ranking
     semantic_weight: float
+    compositional_joint_weight: float
+    compositional_coverage_weight: float
+    compositional_color_competition_weight: float
     identity_weight: float
     concept_weight: float
     face_threshold: float
@@ -106,7 +109,7 @@ class Settings:
             # comparten el espacio de las imágenes ya indexadas por ese modelo.
             text_model=_text("FOTOSEARCH_TEXT_MODEL", "sentence-transformers/clip-ViT-B-32-multilingual-v1"),
             embedding_version=_text("FOTOSEARCH_EMBEDDING_VERSION", "clip-b32-multilingual-v2"),
-            query_pipeline_version=_text("FOTOSEARCH_QUERY_PIPELINE_VERSION", "query-v3"),
+            query_pipeline_version=_text("FOTOSEARCH_QUERY_PIPELINE_VERSION", "query-v4-compositional"),
             face_embedding_version=_text("FOTOSEARCH_FACE_EMBEDDING_VERSION", "facenet-vggface2-v1"),
             translation_enabled=_flag("FOTOSEARCH_TRANSLATION_ENABLED", False),
             translation_timeout_seconds=_number("FOTOSEARCH_TRANSLATION_TIMEOUT_SECONDS", 2.0),
@@ -115,6 +118,9 @@ class Settings:
             enable_face_recognition=_flag("FOTOSEARCH_ENABLE_FACE_RECOGNITION", True),
             face_device=_text("FOTOSEARCH_FACE_DEVICE", "auto").lower(),
             semantic_weight=_number("FOTOSEARCH_SEMANTIC_WEIGHT", 1.0),
+            compositional_joint_weight=_number("FOTOSEARCH_COMPOSITIONAL_JOINT_WEIGHT", 0.70),
+            compositional_coverage_weight=_number("FOTOSEARCH_COMPOSITIONAL_COVERAGE_WEIGHT", 0.30),
+            compositional_color_competition_weight=_number("FOTOSEARCH_COMPOSITIONAL_COLOR_COMPETITION_WEIGHT", 0.10),
             identity_weight=_number("FOTOSEARCH_IDENTITY_WEIGHT", 0.08),
             concept_weight=_number("FOTOSEARCH_CONCEPT_WEIGHT", 0.10),
             face_threshold=_number("FOTOSEARCH_FACE_THRESHOLD", 0.68),
