@@ -1,3 +1,0 @@
-# Opcional: reconocimiento facial. Requiere Python 3.12 o anterior porque
-# facenet-pytorch actualmente limita NumPy a la serie 1.x.
-facenet-pytorch>=2.6,<3

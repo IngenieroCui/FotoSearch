@@ -45,7 +45,6 @@ class ParsedQuery:
     semantic_text: str
     requires_me: bool
     variants: list[str]
-    personal_concepts: list[str]
     constraints: dict[str, object] | None = None
 
     @property
@@ -184,15 +183,13 @@ class QueryNormalizer:
         requires_me = bool(_IDENTITY.search(cleaned))
         cleaned = _IDENTITY.sub(" ", cleaned)
 
-        matched_concepts: list[str] = []
         for name in sorted(concept_names, key=len, reverse=True):
             pattern = re.compile(r"\b" + re.escape(name.lower()) + r"\b", re.I)
             if pattern.search(cleaned):
-                matched_concepts.append(name)
-                # Conserva el sustantivo genérico ("mi perro" -> "perro") para
-                # que la primera etapa siga siendo recuperación CLIP real.
-                generic = re.sub(r"^(?:mi|mis|my)\s+", "", name.lower()).strip()
-                cleaned = pattern.sub(generic if generic != name.lower() else " ", cleaned)
+                # Los conceptos personalizados fueron retirados del MVP. La app
+                # consume requires_me para informar el estado sin ejecutar una
+                # búsqueda semántica incompleta o un fallback legacy.
+                requires_me = True
 
         semantic = _shorten_request(re.sub(r"\s+", " ", cleaned).strip()) or "photo"
         local_english = _local_english(semantic)
@@ -227,6 +224,5 @@ class QueryNormalizer:
             semantic,
             requires_me,
             _deduplicate(variants),
-            _deduplicate(matched_concepts),
             _compositional_constraints(semantic),
         )
