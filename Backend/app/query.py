@@ -6,6 +6,10 @@ from threading import Lock, Thread
 from typing import Callable
 
 
+class QueryTranslationError(RuntimeError):
+    """La consulta no puede continuar sin una traducción al inglés."""
+
+
 # "mi" / "my" por sí solos son posesivos ("mi mascota"), no identidad.
 _IDENTITY = re.compile(r"\b(mi persona|yo|mí|mía|mío|myself|me)\b", re.I)
 _REQUEST_PREFIXES = (
@@ -95,36 +99,6 @@ def _shorten_request(text: str) -> str:
     return text
 
 
-def _local_english(text: str) -> str | None:
-    """Traduce únicamente el vocabulario visual pequeño y conocido."""
-    translated = text
-    changed = False
-
-    # En español el color suele seguir al objeto; en inglés lo precede.
-    object_words = "|".join(
-        sorted(map(re.escape, {**CLOTHING, **COMMON_OBJECTS}), key=len, reverse=True)
-    )
-    color_words = "|".join(sorted(map(re.escape, COLORS), key=len, reverse=True))
-
-    def object_color(match: re.Match[str]) -> str:
-        nonlocal changed
-        changed = True
-        object_word = match.group(1).casefold()
-        color_word = match.group(2).casefold()
-        vocabulary = {**CLOTHING, **COMMON_OBJECTS}
-        return f"{COLORS[color_word]} {vocabulary[object_word]}"
-
-    translated = re.sub(rf"\b({object_words})\s+({color_words})\b", object_color, translated, flags=re.I)
-    vocabulary = {**CLOTHING, **COLORS, **COMMON_OBJECTS, **_OTHER_WORDS}
-    for spanish, english in sorted(vocabulary.items(), key=lambda item: -len(item[0])):
-        replaced = re.sub(r"\b" + re.escape(spanish) + r"\b", english, translated)
-        if replaced != translated:
-            changed = True
-            translated = replaced
-    translated = _naturalize_english(translated)
-    return re.sub(r"\s+", " ", translated).strip() if changed else None
-
-
 def _naturalize_english(text: str) -> str:
     return re.sub(r"\b(person|people)\s+with\s+", r"\1 wearing ", text, flags=re.I)
 
@@ -178,7 +152,7 @@ def _compositional_constraints(semantic: str) -> dict[str, object] | None:
 class QueryNormalizer:
     def __init__(
         self,
-        translation_enabled: bool = False,
+        translation_enabled: bool = True,
         translator: Callable[[str], str] | None = None,
         translation_timeout_seconds: float = 2.0,
     ):
@@ -192,16 +166,16 @@ class QueryNormalizer:
     def _translation_key(text: str) -> str:
         return re.sub(r"\s+", " ", text).strip().casefold()
 
-    def _optional_translation(self, text: str) -> str | None:
+    def _translate_required(self, text: str) -> str:
         if not self.translation_enabled:
-            return None
+            raise QueryTranslationError("English translation is required for search")
         key = self._translation_key(text)
         with self._translation_cache_lock:
             if key in self._translation_cache:
                 value = self._translation_cache.pop(key)
                 self._translation_cache[key] = value
                 return value
-        result: Queue[str | None] = Queue(maxsize=1)
+        result: Queue[tuple[str | None, Exception | None]] = Queue(maxsize=1)
 
         def translate() -> None:
             try:
@@ -210,17 +184,21 @@ class QueryNormalizer:
                 else:
                     from deep_translator import GoogleTranslator
                     value = GoogleTranslator(source="auto", target="en").translate(text)
-                result.put(value)
-            except Exception:
-                result.put(None)
+                result.put((value, None))
+            except Exception as error:
+                result.put((None, error))
 
         # Daemon evita que una caída de Google bloquee el proceso o la búsqueda.
         Thread(target=translate, daemon=True).start()
         try:
-            value = result.get(timeout=self.translation_timeout_seconds)
+            value, error = result.get(timeout=self.translation_timeout_seconds)
         except Empty:
-            value = None
-        value = value.strip() if isinstance(value, str) and value.strip() else None
+            raise QueryTranslationError("English translation timed out") from None
+        if error is not None:
+            raise QueryTranslationError("English translation failed") from error
+        value = re.sub(r"\s+", " ", value.strip()) if isinstance(value, str) else ""
+        if not value:
+            raise QueryTranslationError("English translation was empty")
         with self._translation_cache_lock:
             self._translation_cache[key] = value
             self._translation_cache.move_to_end(key)
@@ -242,19 +220,14 @@ class QueryNormalizer:
                 requires_me = True
 
         semantic = _shorten_request(re.sub(r"\s+", " ", cleaned).strip()) or "photo"
-        local_english = _local_english(semantic)
+        # La traducción remota es obligatoria y es la única consulta que llega
+        # al encoder. Nunca se añade el texto español como fallback.
+        semantic = _naturalize_english(self._translate_required(semantic))
         has_clothing = any(
             re.search(r"\b" + re.escape(word) + r"\b", semantic)
             for word in [*CLOTHING, *CLOTHING.values()]
         )
-        translated = self._optional_translation(semantic)
-        if translated:
-            translated = _naturalize_english(translated)
-        # La traducción completa conserva el orden natural de la frase y tiene
-        # prioridad; la traducción local permite buscar aun sin red.
-        english_variants = _deduplicate(
-            [item for item in [translated, local_english] if item]
-        )
+        english_variants = [semantic]
         variants: list[str] = []
         for english in english_variants:
             variants.append(english)
@@ -263,9 +236,6 @@ class QueryNormalizer:
                 variants.append(f"a photo of a person wearing {english}")
             else:
                 variants.append(f"a photo of {english}")
-        # El texto original es deliberadamente el último recurso.
-        variants.append(semantic)
-
         return ParsedQuery(
             query,
             semantic,

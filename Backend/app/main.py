@@ -19,10 +19,10 @@ from .models import (
     MobileClipQueryPlanResponse,
     MobileClipTextConstraint,
 )
-from .query import QueryNormalizer
+from .query import QueryNormalizer, QueryTranslationError
 
 logger = logging.getLogger(__name__)
-QUERY_PIPELINE_VERSION = "query-v4-compositional"
+QUERY_PIPELINE_VERSION = "query-v5-backend-translation"
 
 
 def _cors_origins() -> list[str]:
@@ -97,7 +97,14 @@ def _embeddings(texts: list[str]) -> dict[str, list[float]]:
 @app.post("/api/mobileclip/query-plan", response_model=MobileClipQueryPlanResponse)
 def mobileclip_query_plan(request: MobileClipQueryPlanRequest) -> MobileClipQueryPlanResponse:
     """Normalize a query and return text vectors; photographs remain on-device."""
-    parsed = app.state.normalizer.parse(request.query, request.concept_names)
+    try:
+        parsed = app.state.normalizer.parse(request.query, request.concept_names)
+    except QueryTranslationError as error:
+        # Sin traducción no se ejecuta una búsqueda parcial en español.
+        raise HTTPException(
+            status_code=503,
+            detail="El traductor español-inglés no está disponible temporalmente.",
+        ) from error
     raw = parsed.constraints
     object_text = str(raw["object_english"]) if raw else None
     attribute_text = str(raw["color"]) if raw else None
