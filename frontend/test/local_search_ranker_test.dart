@@ -33,7 +33,7 @@ void main() {
     MobileClipQueryConstraints? constraints,
   }) => MobileClipQueryPlan(
     embeddingVersion: 'mobileclip-s0-xenova-fp16-v1',
-    queryPipelineVersion: 'query-v4-compositional',
+    queryPipelineVersion: 'query-v5-english-only',
     original: 'query',
     semanticText: 'query',
     requiresMe: false,

@@ -12,7 +12,7 @@ void main() {
 
   Map<String, dynamic> planJson() => {
     'embedding_version': 'mobileclip-s0-xenova-fp16-v1',
-    'query_pipeline_version': 'query-v4-compositional',
+    'query_pipeline_version': 'query-v5-english-only',
     'original': 'camiseta roja',
     'semantic_text': 'red shirt',
     'requires_me': false,

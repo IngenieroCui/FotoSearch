@@ -2,7 +2,7 @@ abstract final class LocalSearchConfig {
   static const embeddingVersion = 'mobileclip-s0-xenova-fp16-v1';
   static const embeddingDimensions = 512;
   static const imageSide = 256;
-  static const queryPipelineVersion = 'query-v5-backend-translation';
+  static const queryPipelineVersion = 'query-v5-english-only';
   static const semanticCandidates = 100;
   static const searchConfidenceThreshold = 0.22;
   static const semanticWeight = 1.0;

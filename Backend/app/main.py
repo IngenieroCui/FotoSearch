@@ -19,10 +19,10 @@ from .models import (
     MobileClipQueryPlanResponse,
     MobileClipTextConstraint,
 )
-from .query import QueryNormalizer, QueryTranslationError
+from .query import QueryNormalizer, QueryTranslationUnavailable
 
 logger = logging.getLogger(__name__)
-QUERY_PIPELINE_VERSION = "query-v5-backend-translation"
+QUERY_PIPELINE_VERSION = "query-v5-english-only"
 
 
 def _cors_origins() -> list[str]:
@@ -38,7 +38,7 @@ async def lifespan(app: FastAPI):
     # no request downloads artifacts or falls back to a legacy service.
     app.state.normalizer = QueryNormalizer(
         translation_enabled=True,
-        translation_timeout_seconds=2.0,
+        translation_timeout_seconds=4.0,
     )
     try:
         app.state.mobileclip_text_encoder = MobileClipTextEncoder()
@@ -99,12 +99,10 @@ def mobileclip_query_plan(request: MobileClipQueryPlanRequest) -> MobileClipQuer
     """Normalize a query and return text vectors; photographs remain on-device."""
     try:
         parsed = app.state.normalizer.parse(request.query, request.concept_names)
-    except QueryTranslationError as error:
-        # Sin traducción no se ejecuta una búsqueda parcial en español.
-        raise HTTPException(
-            status_code=503,
-            detail="El traductor español-inglés no está disponible temporalmente.",
-        ) from error
+    except QueryTranslationUnavailable as error:
+        logger.warning("Query translation unavailable: %s", error)
+        raise HTTPException(503, "Query translation is temporarily unavailable") from error
+    logger.debug("QUERY TRANSLATION original=%r english=%r", request.query, parsed.semantic_text)
     raw = parsed.constraints
     object_text = str(raw["object_english"]) if raw else None
     attribute_text = str(raw["color"]) if raw else None
