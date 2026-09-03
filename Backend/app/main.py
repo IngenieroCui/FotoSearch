@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import logging
+import os
 import re
 
 from fastapi import FastAPI, HTTPException
@@ -24,11 +25,21 @@ logger = logging.getLogger(__name__)
 QUERY_PIPELINE_VERSION = "query-v4-compositional"
 
 
+def _cors_origins() -> list[str]:
+    raw = os.getenv("FOTOSEARCH_CORS_ORIGINS", "*").strip()
+    if not raw or raw == "*":
+        return ["*"]
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup is eager: a deployment missing a bundled model is degraded;
     # no request downloads artifacts or falls back to a legacy service.
-    app.state.normalizer = QueryNormalizer()
+    app.state.normalizer = QueryNormalizer(
+        translation_enabled=True,
+        translation_timeout_seconds=2.0,
+    )
     try:
         app.state.mobileclip_text_encoder = MobileClipTextEncoder()
     except MobileClipTextModelUnavailable:
@@ -40,10 +51,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="FotoSearch", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 
@@ -88,8 +99,8 @@ def mobileclip_query_plan(request: MobileClipQueryPlanRequest) -> MobileClipQuer
     """Normalize a query and return text vectors; photographs remain on-device."""
     parsed = app.state.normalizer.parse(request.query, request.concept_names)
     raw = parsed.constraints
-    object_text = str(raw["object"]) if raw else None
-    attribute_text = str(raw["attribute"]) if raw else None
+    object_text = str(raw["object_english"]) if raw else None
+    attribute_text = str(raw["color"]) if raw else None
     target_color_joint_text = f"{raw['color']} {raw['object_english']}" if raw else None
     competitor_texts = list(raw["color_competitors"]) if raw else []
     texts = [*parsed.joint_variants, *competitor_texts]

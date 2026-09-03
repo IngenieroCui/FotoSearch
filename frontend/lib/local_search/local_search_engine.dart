@@ -6,6 +6,7 @@ import 'mobileclip/mobileclip_query_client.dart';
 import 'models/mobileclip_query_plan.dart';
 import 'ranking/local_search_ranker.dart';
 import 'storage/local_search_database.dart';
+import '../personalization/personal_query.dart';
 
 class LocalSearchEngine {
   LocalSearchEngine({
@@ -32,6 +33,8 @@ class LocalSearchEngine {
   Future<Map<String, dynamic>> searchPlan(
     MobileClipQueryPlan plan, {
     int limit = 30,
+    List<LocalPersonalConcept> concepts = const [],
+    bool personalOnly = false,
   }) async {
     _validatePlan(plan);
     final totalWatch = Stopwatch()..start();
@@ -43,7 +46,12 @@ class LocalSearchEngine {
       await index.reload(database);
     }
     loadWatch.stop();
-    final hits = _ranker.rank(index, plan);
+    final hits = _ranker.rank(
+      index,
+      plan,
+      concepts: concepts,
+      personalOnly: personalOnly,
+    );
     final results = hits
         .take(limit)
         .map((hit) => hit.toMap())
@@ -76,7 +84,8 @@ class LocalSearchEngine {
     }
     final lowConfidence =
         results.isEmpty ||
-        bestSemantic < LocalSearchConfig.searchConfidenceThreshold;
+        (!personalOnly &&
+            bestSemantic < LocalSearchConfig.searchConfidenceThreshold);
     return {
       'query': plan.original,
       'semantic_query': plan.semanticText,

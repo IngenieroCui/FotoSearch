@@ -7,6 +7,7 @@ import 'package:fotosearch/local_search/local_vector.dart';
 import 'package:fotosearch/local_search/models/local_photo_embedding.dart';
 import 'package:fotosearch/local_search/models/mobileclip_query_plan.dart';
 import 'package:fotosearch/local_search/ranking/local_search_ranker.dart';
+import 'package:fotosearch/personalization/personal_query.dart';
 
 void main() {
   Float32List vector(Map<int, double> values) {
@@ -301,6 +302,64 @@ void main() {
       );
       expect(actual[index].bestQueryVariant, expected[index].bestQueryVariant);
     }
+  });
+
+  test('concept-only ranking is led by the photo closest to the concept', () {
+    final index = LocalEmbeddingIndex()
+      ..replaceForTesting([
+        photo('concept', {0: 1}),
+        photo('other', {1: 1}),
+      ]);
+    final concept = LocalPersonalConcept(
+      id: 'pet',
+      name: 'mi mascota',
+      kind: 'custom',
+      prototype: vector({0: 1}),
+      examples: [
+        vector({0: 1}),
+      ],
+      createdAtMs: 1,
+    );
+    final hits = LocalSearchRanker().rank(
+      index,
+      plan(
+        queries: [
+          vector({2: 1}),
+        ],
+      ),
+      concepts: [concept],
+      personalOnly: true,
+    );
+    expect(hits.first.assetId, 'concept');
+  });
+
+  test('semantic plus concept favors the photo satisfying both', () {
+    final index = LocalEmbeddingIndex()
+      ..replaceForTesting([
+        photo('semantic-only', {0: 1}),
+        photo('both', {0: 1, 1: 1}),
+        photo('concept-only', {1: 1}),
+      ]);
+    final concept = LocalPersonalConcept(
+      id: 'me',
+      name: 'yo',
+      kind: 'me',
+      prototype: vector({1: 1}),
+      examples: [
+        vector({1: 1}),
+      ],
+      createdAtMs: 1,
+    );
+    final hits = LocalSearchRanker().rank(
+      index,
+      plan(
+        queries: [
+          vector({0: 1}),
+        ],
+      ),
+      concepts: [concept],
+    );
+    expect(hits.first.assetId, 'both');
   });
 }
 

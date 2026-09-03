@@ -4,6 +4,7 @@ import '../index/local_embedding_index.dart';
 import '../local_search_config.dart';
 import '../models/local_photo_embedding.dart';
 import '../models/mobileclip_query_plan.dart';
+import '../../personalization/personal_query.dart';
 
 class LocalSearchHit {
   const LocalSearchHit({
@@ -59,15 +60,19 @@ class LocalSearchRanker {
 
   List<LocalSearchHit> rank(
     LocalEmbeddingIndex index,
-    MobileClipQueryPlan plan,
-  ) {
-    if (plan.queryEmbeddings.isEmpty) {
+    MobileClipQueryPlan plan, {
+    List<LocalPersonalConcept> concepts = const [],
+    bool personalOnly = false,
+  }) {
+    if (plan.queryEmbeddings.isEmpty && concepts.isEmpty) {
       lastStageADuration = Duration.zero;
       lastStageBDuration = Duration.zero;
       return const [];
     }
     final stageAWatch = Stopwatch()..start();
-    final candidates = _SemanticMinHeap(LocalSearchConfig.semanticCandidates);
+    final semanticCandidates = _SemanticMinHeap(
+      LocalSearchConfig.semanticCandidates,
+    );
     for (var photoIndex = 0; photoIndex < index.length; photoIndex++) {
       var bestIndex = 0;
       var bestScore = double.negativeInfinity;
@@ -85,7 +90,7 @@ class LocalSearchRanker {
           bestIndex = queryIndex;
         }
       }
-      candidates.add(
+      semanticCandidates.add(
         _SemanticCandidate(
           photoIndex: photoIndex,
           semanticScore: bestScore,
@@ -93,7 +98,39 @@ class LocalSearchRanker {
         ),
       );
     }
-    final topCandidates = candidates.toDescendingList();
+    final candidatesByPhoto = <int, _SemanticCandidate>{
+      for (final candidate in semanticCandidates.toDescendingList())
+        candidate.photoIndex: candidate,
+    };
+    for (final concept in concepts) {
+      final personalCandidates = _SemanticMinHeap(
+        LocalSearchConfig.semanticCandidates,
+      );
+      for (var photoIndex = 0; photoIndex < index.length; photoIndex++) {
+        personalCandidates.add(
+          _SemanticCandidate(
+            photoIndex: photoIndex,
+            semanticScore: index.similarityAt(photoIndex, concept.prototype),
+            bestQueryIndex: 0,
+          ),
+        );
+      }
+      for (final candidate in personalCandidates.toDescendingList()) {
+        candidatesByPhoto.putIfAbsent(
+          candidate.photoIndex,
+          () => _SemanticCandidate(
+            photoIndex: candidate.photoIndex,
+            semanticScore: plan.queryEmbeddings.isEmpty
+                ? 0
+                : _bestSemanticScore(index, candidate.photoIndex, plan),
+            bestQueryIndex: plan.queryEmbeddings.isEmpty
+                ? 0
+                : _bestSemanticIndex(index, candidate.photoIndex, plan),
+          ),
+        );
+      }
+    }
+    final topCandidates = candidatesByPhoto.values.toList(growable: false);
     stageAWatch.stop();
     lastStageADuration = stageAWatch.elapsed;
     final stageBWatch = Stopwatch()..start();
@@ -146,7 +183,14 @@ class LocalSearchRanker {
             LocalSearchConfig.compositionalColorCompetitionWeight *
             colorCompetitionScore;
       }
-      final finalScore = LocalSearchConfig.semanticWeight * compositionalScore;
+      final personalScore = concepts.isEmpty
+          ? 0.0
+          : _combinedPersonalScore(index, candidate.photoIndex, concepts);
+      final finalScore = concepts.isEmpty
+          ? LocalSearchConfig.semanticWeight * compositionalScore
+          : personalOnly
+          ? personalScore
+          : 0.55 * compositionalScore + 0.45 * personalScore;
       hits.add(
         LocalSearchHit(
           assetId: photo.assetId,
@@ -154,7 +198,9 @@ class LocalSearchRanker {
           finalScore: finalScore,
           semanticScore: candidate.semanticScore,
           relevanceScore: candidate.semanticScore,
-          bestQueryVariant: plan.jointVariants[candidate.bestQueryIndex],
+          bestQueryVariant: plan.jointVariants.isEmpty
+              ? ''
+              : plan.jointVariants[candidate.bestQueryIndex],
           jointScore: jointScore,
           objectScore: objectScore,
           attributeScore: attributeScore,
@@ -169,6 +215,61 @@ class LocalSearchRanker {
     stageBWatch.stop();
     lastStageBDuration = stageBWatch.elapsed;
     return hits;
+  }
+
+  static int _bestSemanticIndex(
+    LocalEmbeddingIndex index,
+    int photoIndex,
+    MobileClipQueryPlan plan,
+  ) {
+    var bestIndex = 0;
+    var bestScore = double.negativeInfinity;
+    for (
+      var queryIndex = 0;
+      queryIndex < plan.queryEmbeddings.length;
+      queryIndex++
+    ) {
+      final score = index.similarityAt(
+        photoIndex,
+        plan.queryEmbeddings[queryIndex],
+      );
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = queryIndex;
+      }
+    }
+    return bestIndex;
+  }
+
+  static double _bestSemanticScore(
+    LocalEmbeddingIndex index,
+    int photoIndex,
+    MobileClipQueryPlan plan,
+  ) => index.similarityAt(
+    photoIndex,
+    plan.queryEmbeddings[_bestSemanticIndex(index, photoIndex, plan)],
+  );
+
+  static double _combinedPersonalScore(
+    LocalEmbeddingIndex index,
+    int photoIndex,
+    List<LocalPersonalConcept> concepts,
+  ) {
+    var combined = double.infinity;
+    for (final concept in concepts) {
+      final prototypeScore = index.similarityAt(photoIndex, concept.prototype);
+      var exampleScore = double.negativeInfinity;
+      for (final example in concept.examples) {
+        final score = index.similarityAt(photoIndex, example);
+        if (score > exampleScore) exampleScore = score;
+      }
+      if (exampleScore == double.negativeInfinity) {
+        exampleScore = prototypeScore;
+      }
+      final score = 0.40 * prototypeScore + 0.60 * exampleScore;
+      if (score < combined) combined = score;
+    }
+    return combined;
   }
 
   double _similarity(

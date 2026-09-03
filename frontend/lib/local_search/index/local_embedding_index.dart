@@ -123,6 +123,14 @@ class LocalEmbeddingIndex {
 
   Iterable<String> get assetIds => _indexByAssetId.keys;
 
+  void clear() {
+    _matrix = Float32List(0);
+    _metadata = <LocalPhotoMetadata>[];
+    _indexByAssetId = <String, int>{};
+    _length = 0;
+    _capacity = 0;
+  }
+
   void _writeAt(
     int index,
     LocalPhotoEmbedding photo, {

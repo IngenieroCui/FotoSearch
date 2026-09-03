@@ -24,9 +24,8 @@ miniaturas ni embeddings de imágenes.
 
 ## Flutter
 
-La URL configurada debe terminar en `/api`. Copia `frontend/.env.example` a
-`frontend/.env` para desarrollo local, o proporciona la URL de Vercel durante
-la compilación. También se puede cambiar desde Ajustes.
+La URL se incorpora exclusivamente durante la compilación y debe terminar en
+`/api`. No puede cambiarse desde la aplicación.
 
 ```powershell
 cd frontend
@@ -35,9 +34,7 @@ flutter run --dart-define=FOTOSEARCH_API_BASE_URL=https://YOUR-PROJECT.vercel.ap
 flutter build apk --release --dart-define=FOTOSEARCH_API_BASE_URL=https://YOUR-PROJECT.vercel.app/api
 ```
 
-El fallback incorporado es exclusivamente local de desarrollo:
-`http://10.0.2.2:8000/api`. No hay una URL productiva ficticia incluida en el
-APK.
+No existe fallback ni URL productiva ficticia incluida en el APK.
 
 ## Backend y Vercel
 
@@ -69,11 +66,5 @@ uvicorn app.main:app --reload
 Comprueba `GET /api/health` y envía un `POST /api/mobileclip/query-plan` con
 `{ "query": "camiseta roja", "concept_names": [] }`.
 
-## Pendientes futuros
-
-- "yo"
-- conceptos personales
-- feedback/aprendizaje
-
-Las consultas que requieren esas capacidades muestran: "Las búsquedas
-personalizadas todavía no están disponibles."
+La personalización de “yo” y conceptos propios se guarda y se resuelve
+localmente; el backend continúa recibiendo únicamente texto semántico.

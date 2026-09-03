@@ -11,6 +11,11 @@ abstract final class LocalSearchConfig {
   static const compositionalColorCompetitionWeight = 0.10;
   static const localThumbnailSide = 256;
   static const localThumbnailQuality = 82;
-  static const visionModelAsset =
+  static const indexInferenceBatchSize = 64;
+  static const thumbnailConcurrency = 8;
+  static const databaseBatchSize = 64;
+  static const visionModelPrimaryAsset =
+      'assets/models/mobileclip_s0/vision_model.onnx';
+  static const visionModelFallbackAsset =
       'assets/models/mobileclip_s0/vision_model_fp16.onnx';
 }

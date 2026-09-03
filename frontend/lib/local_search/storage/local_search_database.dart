@@ -6,6 +6,7 @@ import 'package:sqflite/sqflite.dart';
 import '../local_search_config.dart';
 import '../local_vector.dart';
 import '../models/local_photo_embedding.dart';
+import '../../personalization/personal_query.dart';
 
 class LocalPhotoBatchUpsertResult {
   const LocalPhotoBatchUpsertResult({
@@ -33,7 +34,7 @@ class LocalSearchDatabase {
     );
     final database = await openDatabase(
       databasePath,
-      version: 1,
+      version: 2,
       onCreate: (db, _) async {
         await db.execute(
           'CREATE TABLE app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
@@ -44,6 +45,10 @@ class LocalSearchDatabase {
         await db.execute(
           'CREATE INDEX idx_photos_embedding_version ON photos(embedding_version)',
         );
+        await _createPersonalizationTables(db);
+      },
+      onUpgrade: (db, oldVersion, _) async {
+        if (oldVersion < 2) await _createPersonalizationTables(db);
       },
     );
     try {
@@ -179,6 +184,102 @@ class LocalSearchDatabase {
           .toList(growable: false);
 
   Future<void> clearPhotos() => _requireDatabase().delete('photos');
+
+  Future<List<LocalPersonalConcept>> personalConcepts() async {
+    final database = _requireDatabase();
+    final rows = await database.query(
+      'personal_concepts',
+      orderBy: 'created_at_ms ASC',
+    );
+    final concepts = <LocalPersonalConcept>[];
+    for (final row in rows) {
+      final prototypeBlob = row['prototype_embedding'];
+      if (prototypeBlob is! Uint8List) {
+        throw StateError('Stored personal prototype is not a BLOB.');
+      }
+      final exampleRows = await database.query(
+        'personal_concept_examples',
+        columns: ['embedding'],
+        where: 'concept_id = ?',
+        whereArgs: [row['id']],
+      );
+      concepts.add(
+        LocalPersonalConcept(
+          id: row['id'] as String,
+          name: row['name'] as String,
+          kind: row['kind'] as String,
+          prototype: LocalVector.blobToVector(prototypeBlob),
+          examples: exampleRows
+              .map((example) {
+                final blob = example['embedding'];
+                if (blob is! Uint8List) {
+                  throw StateError('Stored personal example is not a BLOB.');
+                }
+                return LocalVector.blobToVector(blob);
+              })
+              .toList(growable: false),
+          createdAtMs: row['created_at_ms'] as int,
+        ),
+      );
+    }
+    return concepts;
+  }
+
+  Future<void> savePersonalConcept(
+    LocalPersonalConcept concept,
+    Map<String, Float32List> examples,
+  ) async {
+    if (concept.kind != 'me' && concept.kind != 'custom') {
+      throw ArgumentError.value(concept.kind, 'kind', 'must be me or custom');
+    }
+    await _requireDatabase().transaction((transaction) async {
+      await transaction.delete(
+        'personal_concept_examples',
+        where: 'concept_id = ?',
+        whereArgs: [concept.id],
+      );
+      await transaction.insert('personal_concepts', {
+        'id': concept.id,
+        'name': concept.name,
+        'kind': concept.kind,
+        'prototype_embedding': LocalVector.vectorToBlob(concept.prototype),
+        'created_at_ms': concept.createdAtMs,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      final batch = transaction.batch();
+      for (final entry in examples.entries) {
+        batch.insert('personal_concept_examples', {
+          'concept_id': concept.id,
+          'asset_id': entry.key,
+          'embedding': LocalVector.vectorToBlob(entry.value),
+        });
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  Future<void> deletePersonalConcept(String id) async {
+    await _requireDatabase().transaction((transaction) async {
+      await transaction.delete(
+        'personal_concept_examples',
+        where: 'concept_id = ?',
+        whereArgs: [id],
+      );
+      await transaction.delete(
+        'personal_concepts',
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    });
+  }
+
+  static Future<void> _createPersonalizationTables(Database db) async {
+    await db.execute(
+      'CREATE TABLE personal_concepts (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, prototype_embedding BLOB NOT NULL, created_at_ms INTEGER NOT NULL)',
+    );
+    await db.execute(
+      'CREATE TABLE personal_concept_examples (concept_id TEXT NOT NULL, asset_id TEXT NOT NULL, embedding BLOB NOT NULL, PRIMARY KEY(concept_id, asset_id))',
+    );
+  }
 
   Future<void> _upsert(DatabaseExecutor database, LocalPhotoEmbedding photo) =>
       database.insert(
